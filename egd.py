@@ -2,7 +2,7 @@ import inspect
 import os
 import sys
 import threading
-from math import sin, ceil, pi, dist, sqrt
+from math import sin, cos, ceil, pi, dist, radians
 from random import randint
 from time import time, sleep
 from typing import overload, Iterable
@@ -13,7 +13,7 @@ import pygame as pg
 class Settings:
     FPS = 60
     rate = .3
-    coordinates = True
+    coordinates = False
 
     background = '#FDF7F0'
     line = '#c7b095'
@@ -48,6 +48,17 @@ def detect_importer_filename():
             return path
     else:
         return "SELF"
+
+
+def rotate(point: tuple, anchor: tuple, angle: float) -> tuple:
+    x, y = point
+    ax, ay = anchor
+
+    angle_rad = radians(angle)
+
+    return\
+        (x - ax) * cos(angle_rad) - (y - ay) * sin(angle_rad) + ax, \
+        (x - ax) * sin(angle_rad) + (y - ay) * cos(angle_rad) + ay
 
 
 def sgn(value):
@@ -88,6 +99,9 @@ class Point:
 
     def asTuple(self): return self.getX(), self.getY()
 
+    def __iter__(self):
+        yield self._x
+        yield self._y
 
 class InterpolatedValue:
     value: float
@@ -104,6 +118,7 @@ class InterpolatedValue:
 
     def tick(self, ):
         self.value += round((self.dest - self.value) * self.rate, 5)
+        return self.value
 
 
 class InterpolatedPoint:
@@ -124,6 +139,8 @@ class InterpolatedPoint:
         self.point.addX(round((self.dest.getX() - self.point.getX()) * self.rate, 5))
         self.point.addY(round((self.dest.getY() - self.point.getY()) * self.rate, 5))
         self.factor.tick()
+
+        return self.point
 
     def getX(self): return self.point.getX()  # * self.factor.value
 
@@ -160,6 +177,9 @@ class Display:
         self.draggables = set()
         self.dragging = None
 
+    def restoreX(self, x): return (x - self.midX()) / self.scale - self.view.getX() / self.scale
+    def restoreY(self, y): return (y - self.midY()) / self.scale - self.view.getY() / self.scale
+
     def run_forever(self, title=None):
         pg.init()
         filename = detect_importer_filename()
@@ -183,13 +203,18 @@ class Display:
         self.display.fill(self.settings.background)
         self.draw_grid()
 
-        for obj in self.objects: obj.draw_me()
+        for obj in self.objects:
+            obj.draw_me()
+            if isinstance(obj, GraphTickable):
+                obj.tick()
+
         self.zoom_tick()
         self.toast_tick()
 
         if self.settings.coordinates:
-            message = f' X: {self.view.getX():.1f} Y: {self.view.getY():.1f} '
-            self.display.blit(self.base_font.render(message, True, '#ffffff', '#000000'), (0, 0))
+            x, y = pg.mouse.get_pos()
+            message = f' X: {self.restoreX(x):.2f} Y: {self.restoreY(y):.2f} '
+            self.display.blit(self.base_font.render(message, True, '#ffffff', '#000000'), (x, y))
 
         self.draw_click_circle()
 
@@ -385,6 +410,8 @@ class Display:
 
     def scaling(self):  return self.scale / self.init_scale
     def Iscaling(self): return self.Iscale.value / self.init_scale
+    def set_view(self, x, y):
+        self.Iview.set_dest(Point(-x * self.scaling() * 100, y * self.scaling() * 100))
 
 
 class AbstractGraph:
@@ -394,9 +421,78 @@ class AbstractGraph:
 
     def transformX(self, x): return x * self.display.Iscale.value + self.display.midX() + self.display.Iview.getX()
     def transformY(self, y): return y * self.display.Iscale.value + self.display.midY() + self.display.Iview.getY()
+    def transformAll(self, coords): return self.transformX(coords[0]), self.transformY(coords[1])
 
     def restoreX(self, x): return (x - self.display.midX()) / self.display.scale - self.display.view.getX() / self.display.scale
     def restoreY(self, y): return (y - self.display.midY()) / self.display.scale - self.display.view.getY() / self.display.scale
+    def restoreAll(self, coords): return self.restoreX(coords[0]), self.restoreY(coords[1])
+
+
+class GraphTickable(AbstractGraph):
+    def tick(self): pass
+
+
+class GraphTurtle(GraphTickable):
+    def __init__(self, display: Display, x, y, angle=180, speed=1):
+        super().__init__(display)
+
+        self.st = time()
+        self.queue = []
+        self.lines = [[x, -y], [x, -y]]
+
+        self.x, self.y = x, -y
+        self.angle = angle
+        self.speed = speed
+
+        self.Ipos   = InterpolatedPoint(Point(x, -y), .5)
+        self.Iangle = InterpolatedValue(angle, .5)
+
+    def draw_me(self):
+        x, y = self.Ipos.tick()
+        iangle = self.Iangle.tick()
+        points1 = map(
+            lambda e: rotate(e, (x, y), iangle),
+            (
+                (+0.0 + x, +0.0 + y),
+                (+0.2 + x, -0.5 + y),
+                (+0.0 + x, -0.4 + y),
+                (-0.2 + x, -0.5 + y)
+            )
+        )
+        points2 = map(
+            lambda e: rotate(e, (x, y), iangle),
+            (
+                (+0.0 + x, -0.06 + y),
+                (+0.155 + x, -0.45 + y),
+                (+0.0 + x, -0.37 + y),
+                (-0.155 + x, -0.45 + y)
+            )
+        )
+        lines = self.lines if dist(self.Ipos.point, self.Ipos.dest) < .1 else (self.lines[:-1] + [[x, y]])
+        pg.draw.lines(self.display.display, "#ff0000", False, tuple(map(self.transformAll, lines)), width=5)
+        pg.draw.polygon(self.display.display, "#000000", tuple(map(self.transformAll, points1)))
+        pg.draw.polygon(self.display.display, "#ffffff", tuple(map(self.transformAll, points2)))
+
+    def tick(self):
+        if time() - self.st < 0.3 / self.speed: return
+        if not self.queue: return
+
+        self.st = time()
+        action, data = self.queue.pop(0)
+        match action:
+            case "forward":
+                xo, yo = rotate((0, data), (0, 0), self.angle)
+                self.x += xo
+                self.y += yo
+                self.lines.append([self.x, self.y])
+                self.Ipos.set_dest(Point(self.x, self.y))
+            case "turn":
+                self.angle += data
+                self.Iangle.set_dest(self.angle)
+
+    def forward(self, distance): self.queue.append(("forward", distance))
+    def right(self, angle): self.queue.append(("turn", angle))
+    def left(self, angle): self.queue.append(("turn", -angle))
 
 
 class GraphImage(AbstractGraph):
@@ -590,4 +686,15 @@ if __name__ == "__main__":
     thread.start()
 
     st = time()
-    dp.settings.darkMode()
+    # dp.settings.darkMode()
+    turtle = GraphTurtle(dp, 0, 0)
+    dp.add_object(turtle)
+
+    for _ in range(4):
+        turtle.forward(8)
+        turtle.right(90)
+
+    for x in range(0, 9):
+        for y in range(0, 9):
+            dp.add_object(GraphDot(dp, x, y, "#aa0055" if x in [0, 8] or y in [0, 8] else "#00ff00"))
+            sleep(0.01)
